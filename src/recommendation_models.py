@@ -58,31 +58,56 @@ class HybridRecommender:
         self.recipe_ids = self.user_item_matrix.columns.tolist()
         
     def _train_content_based(self, recipes_df):
-        """Train content-based filtering using recipe features"""
-        # Combine ingredients and tags for content features
+        """Train content-based filtering component"""
+        print("📝 Training Content-Based Filtering...")
+        
+        # Prepare content features
         recipes_df['content'] = recipes_df['ingredients'].apply(lambda x: ' '.join(x) if isinstance(x, list) else '')
         recipes_df['content'] += ' ' + recipes_df['tags'].apply(lambda x: ' '.join(x) if isinstance(x, list) else '')
         
         # TF-IDF vectorization
         tfidf = TfidfVectorizer(max_features=1000, stop_words='english')
-        self.recipe_features = tfidf.fit_transform(recipes_df['content'])
+        content_features = tfidf.fit_transform(recipes_df['content'])
+        
+        # After sampling and remapping, recipe IDs are now contiguous integers (0 to len-1)
+        # So we can directly use the recipe ID as the index into content_features
+        aligned_content_features = []
+        for recipe_id in self.recipe_ids:
+            # recipe_id is now a contiguous integer (0 to len-1)
+            if 0 <= recipe_id < content_features.shape[0]:
+                aligned_content_features.append(content_features[recipe_id].toarray().flatten())
+            else:
+                # If recipe not found, use zero vector
+                aligned_content_features.append(np.zeros(content_features.shape[1]))
+        
+        self.content_features = np.array(aligned_content_features)
         
     def recommend(self, user_id, n_recommendations=10):
         """Generate recommendations for a user"""
-        if user_id not in self.user_ids:
-            return []
+        if self.user_ids is None or user_id not in self.user_ids:
+            raise ValueError(f"User {user_id} not found in training data")
         
         user_idx = self.user_ids.index(user_id)
         
         # Get collaborative filtering scores
-        user_vector = self.user_features[user_idx].reshape(1, -1)
-        cf_scores = cosine_similarity(user_vector, self.recipe_features)[0]
+        if self.user_features is not None and self.recipe_features is not None:
+            cf_scores = self.user_features[user_idx] @ self.recipe_features.T
+        else:
+            cf_scores = np.zeros(len(self.recipe_ids) if self.recipe_ids is not None else 0)
         
         # Get content-based scores (if available)
-        cb_scores = np.zeros(len(self.recipe_ids))
-        if hasattr(self, 'recipe_features'):
-            # For simplicity, use average content similarity
-            cb_scores = np.mean(self.recipe_features.toarray(), axis=1)
+        cb_scores = np.zeros(len(self.recipe_ids) if self.recipe_ids is not None else 0)
+        if hasattr(self, 'content_features') and self.content_features is not None:
+            # Use content similarity between user preferences and recipe features
+            user_preferences = self.user_item_matrix.iloc[user_idx]
+            # Weight content features by user ratings
+            weighted_content = np.zeros(self.content_features.shape[1])
+            for i, rating in enumerate(user_preferences):
+                if rating > 0:
+                    weighted_content += rating * self.content_features[i]
+            
+            # Calculate similarity with all recipes
+            cb_scores = cosine_similarity([weighted_content], self.content_features)[0]
         
         # Combine scores
         hybrid_scores = (self.collaborative_weight * cf_scores + 
@@ -93,9 +118,10 @@ class HybridRecommender:
         
         recommendations = []
         for idx in top_indices:
-            recipe_id = self.recipe_ids[idx]
-            score = hybrid_scores[idx]
-            recommendations.append((recipe_id, score))
+            if self.recipe_ids is not None and idx < len(self.recipe_ids):
+                recipe_id = self.recipe_ids[idx]
+                score = hybrid_scores[idx]
+                recommendations.append((recipe_id, score))
             
         return recommendations
     
@@ -108,7 +134,8 @@ class HybridRecommender:
             'user_ids': self.user_ids,
             'recipe_ids': self.recipe_ids,
             'collaborative_weight': self.collaborative_weight,
-            'content_weight': self.content_weight
+            'content_weight': self.content_weight,
+            'content_features': self.content_features
         }
         
         with open(filepath, 'wb') as f:
@@ -131,6 +158,7 @@ class HybridRecommender:
         model.recipe_features = model_data['recipe_features']
         model.user_ids = model_data['user_ids']
         model.recipe_ids = model_data['recipe_ids']
+        model.content_features = model_data['content_features']
         
         return model
 

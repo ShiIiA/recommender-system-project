@@ -1,7 +1,4 @@
-<<<<<<< Updated upstream
-# recommender-system-project
-=======
-# 🌿 Ghibli Recipe Garden - AI-Powered Recipe Recommendation System
+# 🌿 Recipists - AI-Powered Recipe Recommendation System
 
 A comprehensive, environmentally-conscious recipe recommendation system built with Streamlit and machine learning. Features personalized recommendations, health scoring, carbon footprint analysis, and an engaging user experience with avatar selection and gamification.
 
@@ -200,9 +197,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 For questions, issues, or contributions:
 - Create an issue on GitHub
-- Project URL: https://github.com/ShiIiA/recipe-recommender-system
+- Project URL: https://github.com/ShiIiA/recipists
 
 ---
 
 **🌿 Made with ❤️ for sustainable cooking and healthy eating! 🌿**
->>>>>>> Stashed changes

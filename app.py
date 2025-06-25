@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime, date
 import json
 import os
+from src.recommendation_models import HybridRecommender
 import random
 from src.models.hybrid import HybridModel
 from src.utils.utils import load_pickle
@@ -18,7 +19,7 @@ import hashlib
 
 # Page configuration
 st.set_page_config(
-    page_title="🌿 Ghibli Recipe Garden - AI Powered",
+    page_title="Recipists - AI Recipe Recommender",
     page_icon="🌿",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -70,7 +71,10 @@ def init_session_state():
 def load_model():
     """Load the trained hybrid recommendation model and id mappings"""
     try:
-        model = HybridModel.load_model("models/hybrid_recommender.pkl")
+        # Load the hybrid model using the correct method
+        model = HybridRecommender.load_model("models")
+        
+        # Load ID mappings
         id_mappings = load_pickle(Path(ID_MAPPINGS_PATH))
         st.success("🤖 Hybrid Recommendation Engine Ready")
         return model, id_mappings
@@ -89,6 +93,17 @@ def load_recipe_data():
             return df
         except Exception as e:
             st.error(f"Error loading processed recipes: {e}")
+    
+    # Try alternative processed file
+    alt_path = Path("processed_data/recipes_full.pkl")
+    if alt_path.exists():
+        try:
+            df = pd.read_pickle(alt_path)
+            st.info("Loaded full recipes for model compatibility.")
+            return df
+        except Exception as e:
+            st.error(f"Error loading full recipes: {e}")
+    
     # Fallback to raw CSV
     raw_path = Path("data/RAW_recipes.csv")
     if raw_path.exists():
@@ -97,7 +112,7 @@ def load_recipe_data():
             df['id'] = df.get('id', pd.Series(range(len(df))))
             df['ingredients'] = df['ingredients'].apply(lambda x: ast.literal_eval(x) if pd.notna(x) and isinstance(x, str) else [])
             df['tags'] = df['tags'].apply(lambda x: ast.literal_eval(x) if pd.notna(x) and isinstance(x, str) else [])
-            df['steps'] = df['recipe_steps'].apply(lambda x: ast.literal_eval(x) if pd.notna(x) and isinstance(x, str) else [])
+            df['steps'] = df['steps'].apply(lambda x: ast.literal_eval(x) if pd.notna(x) and isinstance(x, str) else [])
             
             # Calculate comprehensive health scores
             df['health_score'] = df.apply(calculate_health_score, axis=1)
@@ -116,6 +131,27 @@ def load_recipe_data():
 @st.cache_data
 def load_interaction_data():
     """Load and preprocess interaction data from CSV"""
+    # Try processed interactions first
+    processed_path = Path("processed_data/interactions_processed.pkl")
+    if processed_path.exists():
+        try:
+            df = pd.read_pickle(processed_path)
+            st.info("Loaded processed interactions.")
+            return df
+        except Exception as e:
+            st.error(f"Error loading processed interactions: {e}")
+    
+    # Try full interactions
+    full_path = Path("processed_data/interactions_full.pkl")
+    if full_path.exists():
+        try:
+            df = pd.read_pickle(full_path)
+            st.info("Loaded full interactions.")
+            return df
+        except Exception as e:
+            st.error(f"Error loading full interactions: {e}")
+    
+    # Fallback to raw CSV
     path = Path("data/RAW_interactions.csv")
     if not path.exists():
         st.warning("`data/RAW_interactions.csv` not found. No interaction data loaded.")
@@ -160,8 +196,8 @@ def load_user_profile(user_id):
     
     if filepath.exists():
         try:
-        with open(filepath, 'r') as f:
-            return json.load(f)
+            with open(filepath, 'r') as f:
+                return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError) as e:
             # If the JSON file is corrupted, create a backup and return default profile
             st.warning(f"Profile file corrupted for user {user_id}. Creating new profile.")
@@ -200,6 +236,22 @@ def get_default_profile(user_id):
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+def format_cooking_time(minutes):
+    """Format cooking time in hours and minutes if over 60 minutes"""
+    if minutes is None or pd.isna(minutes):
+        return "N/A"
+    
+    minutes = int(minutes)
+    if minutes < 60:
+        return f"{minutes} min"
+    else:
+        hours = minutes // 60
+        remaining_minutes = minutes % 60
+        if remaining_minutes == 0:
+            return f"{hours}h"
+        else:
+            return f"{hours}h{remaining_minutes:02d}"
+
 def get_avatar_info(avatar_key):
     """Get avatar information by key"""
     avatars = {
@@ -299,7 +351,8 @@ def get_sustainability_tips():
         "♻️ Use leftovers creatively in new dishes",
         "⚡ Cook in batches to save energy",
         "🌍 Support fair-trade and organic products",
-        "🥬 Use vegetable scraps for homemade broth"
+        "🥬 Use vegetable scraps for homemade broth",
+        "📊 Check the [BBC Food CO2 Calculator](https://www.bbc.com/news/science-environment-46459714) for detailed carbon footprint data"
     ]
 
 def calculate_health_score(recipe):
@@ -342,26 +395,62 @@ def calculate_health_score(recipe):
     return max(0, min(100, score))
 
 def calculate_carbon_footprint(recipe):
-    """Calculate carbon footprint based on ingredients"""
-    # Carbon footprint per kg of common ingredients (kg CO2e/kg)
+    """Calculate carbon footprint based on ingredients using real data (kg CO2e per kg)"""
+    # Updated carbon footprint per kg of common ingredients (kg CO2e/kg)
+    # Based on real data from scientific studies and BBC Food CO2 Calculator
     carbon_factors = {
-        # High impact
-        'beef': 13.3, 'lamb': 39.2, 'pork': 7.2, 'chicken': 6.9, 'turkey': 6.9,
-        'cheese': 13.5, 'milk': 3.0, 'eggs': 4.8, 'butter': 23.8,
+        # High impact (animal products)
+        'beef': 34.67,
+        'lamb': 20.0,
+        'cheese': 20.0,
+        'shrimp': 18.02,  # farmed
+        'pork': 7.07,
+        'chicken': 5.98,
+        'turkey': 5.98,
+        'butter': 10.77,
+        'milk': 3.0,
+        'eggs': 4.8,
         
         # Medium impact
-        'fish': 3.0, 'shrimp': 12.0, 'salmon': 3.0, 'tuna': 3.0,
-        'rice': 2.7, 'pasta': 1.4, 'bread': 1.4, 'potato': 0.2,
+        'fish': 3.0,
+        'salmon': 3.0,
+        'tuna': 3.0,
+        'rice': 2.7,
+        'pasta': 1.4,
+        'bread': 1.4,
+        'potato': 2.9,
         
-        # Low impact
-        'tomato': 1.4, 'lettuce': 0.4, 'carrot': 0.4, 'onion': 0.4,
-        'apple': 0.4, 'banana': 0.7, 'orange': 0.3, 'broccoli': 0.4,
-        'spinach': 0.4, 'kale': 0.4, 'cucumber': 0.4, 'bell pepper': 0.4,
-        'mushroom': 0.4, 'garlic': 0.4, 'ginger': 0.4, 'lemon': 0.3,
-        'lime': 0.3, 'avocado': 0.4, 'olive oil': 6.0, 'vegetable oil': 3.8,
+        # Lower impact (plant-based)
+        'nuts': 2.3,
+        'beans': 2.0,
+        'tofu': 2.0,
+        'tomato': 1.4,
+        'lettuce': 0.4,
+        'carrot': 0.4,
+        'onion': 0.4,
+        'apple': 0.4,
+        'banana': 0.7,
+        'orange': 0.3,
+        'broccoli': 0.4,
+        'spinach': 0.4,
+        'kale': 0.4,
+        'cucumber': 0.4,
+        'bell pepper': 0.4,
+        'mushroom': 0.4,
+        'garlic': 0.4,
+        'ginger': 0.4,
+        'lemon': 0.3,
+        'lime': 0.3,
+        'avocado': 0.4,
+        'olive oil': 6.0,
+        'vegetable oil': 3.8,
         
         # Very low impact
-        'water': 0.0, 'salt': 0.0, 'pepper': 0.0, 'herbs': 0.0, 'spices': 0.0
+        'water': 0.0,
+        'salt': 0.0,
+        'pepper': 0.0,
+        'herbs': 0.0,
+        'spices': 0.0
     }
     
     ingredients = recipe.get('ingredients', [])
@@ -380,9 +469,9 @@ def calculate_carbon_footprint(recipe):
                 total_carbon += ingredient_carbon
                 
                 # Categorize ingredients by impact
-                if factor >= 5.0:
+                if factor >= 10.0:
                     high_impact_ingredients.append((ingredient, factor))
-                elif factor >= 1.0:
+                elif factor >= 3.0:
                     medium_impact_ingredients.append((ingredient, factor))
                 else:
                     low_impact_ingredients.append((ingredient, factor))
@@ -586,7 +675,7 @@ def create_header():
     st.markdown(f"""
     <div style="background: {theme['gradient']}; padding: 3rem; border-radius: 0 0 30px 30px; margin: -3rem -3rem 2rem -3rem; text-align: center;">
         <h1 style="color: white; font-size: 3.5rem; margin: 0; text-shadow: 2px 2px 4px rgba(0,0,0,0.2);">
-            {theme['emoji']} Ghibli Recipe Garden {theme['emoji']}
+            {theme['emoji']} Recipists {theme['emoji']}
         </h1>
         <p style="color: white; font-size: 1.5rem; margin: 1rem 0; opacity: 0.95;">
             {current_time} • {current_date}
@@ -615,13 +704,13 @@ def display_recipe_card(recipe, context="view", show_actions=True):
     <div style="border: 1px solid #e0e0e0; border-radius: 15px; padding: 1.5rem; margin: 1rem 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
         <h3 style="margin-top: 0; color: #2c3e50;">{recipe['name']}</h3>
     """, unsafe_allow_html=True)
-        
-        # Tags
-        if 'tags' in recipe and recipe['tags']:
+    
+    # Tags
+    if 'tags' in recipe and recipe['tags']:
         tags_html = " ".join([f"<span style='background: #e8f5e8; padding: 3px 8px; border-radius: 12px; margin: 2px; display: inline-block; font-size: 0.8rem; color: #2d5a2d;'>{tag}</span>" 
                             for tag in recipe['tags'][:4]])
-            st.markdown(tags_html, unsafe_allow_html=True)
-        
+        st.markdown(tags_html, unsafe_allow_html=True)
+    
     # Enhanced description from LLM
     if enhanced_description:
         st.markdown(f"<p style='color: #2c3e50; font-size: 0.9rem; font-style: italic;'>{enhanced_description}</p>", unsafe_allow_html=True)
@@ -634,7 +723,7 @@ def display_recipe_card(recipe, context="view", show_actions=True):
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("⏱️ Time", f"{recipe.get('minutes', 30)} min")
+        st.metric("⏱️ Time", format_cooking_time(recipe.get('minutes', 30)))
     
     with col2:
         # Health score with color coding
@@ -696,7 +785,7 @@ def display_recipe_card(recipe, context="view", show_actions=True):
                 if achievement_name:
                     award_achievement(f"eco_{achievement_name.lower().replace(' ', '_')}", achievement_desc, points)
                 else:
-                award_achievement("first_cook", "First Dish Cooked!", 30)
+                    award_achievement("first_cook", "First Dish Cooked!", 30)
                 st.balloons()
 
 def add_rating(recipe_id, rating):
@@ -794,7 +883,7 @@ def home_page():
                         enhanced_recipes = []
                         
                         for recipe_id, score in recommendations:
-                                if recipe_id in recipes_df['id'].values:
+                            if recipe_id in recipes_df['id'].values:
                                 recipe = recipes_df[recipes_df['id'] == recipe_id].iloc[0].to_dict()
                                 if llm_enhancer:
                                     enhanced = llm_enhancer.enhance_recommendations([recipe], profile)[0]
@@ -811,14 +900,14 @@ def home_page():
                         for i in range(0, len(enhanced_recipes), 2):
                             cols = st.columns(2)
                             for j, recipe in enumerate(enhanced_recipes[i:i+2]):
-                                    with cols[j]:
-                                        with st.container():
+                                with cols[j]:
+                                    with st.container():
                                         match_score = recipe.get('match_score', 0)
                                         st.markdown(f"**Match Score: {match_score*100:.0f}%**")
                                         if llm_enhancer and 'personalization_score' in recipe:
                                             personalization = recipe['personalization_score']
                                             st.markdown(f"**Personalization: {personalization*100:.0f}%**")
-                                            display_recipe_card(recipe, context=f"rec_{i}_{j}")
+                                        display_recipe_card(recipe, context=f"rec_{i}_{j}")
                     else:
                         st.info("Couldn't find a good match. Try liking more recipes!")
                 else:
@@ -882,10 +971,10 @@ def explore_page():
         search_query = st.text_input("🔍 Search recipes...")
     
     # Sort options
-        sort_by = st.selectbox(
-            "📊 Sort by",
+    sort_by = st.selectbox(
+        "📊 Sort by",
         ["Health Score", "Carbon Footprint", "Cooking Time", "Popularity"]
-        )
+    )
     
     # Apply filters
     filtered_df = recipes_df.copy()
@@ -974,7 +1063,7 @@ def recipe_detail_page():
     carbon_insight = get_carbon_insight(carbon_footprint)
     
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("⏱️ Time", f"{recipe.get('minutes', 'N/A')} min")
+    col1.metric("⏱️ Time", format_cooking_time(recipe.get('minutes', 'N/A')))
     
     # Health score with color coding
     health_color = "#28a745" if health_score >= 70 else "#ffc107" if health_score >= 50 else "#dc3545"
@@ -1094,7 +1183,7 @@ def recipe_detail_page():
 
 def login_page():
     """Page for user to login or create a new profile."""
-    st.markdown("# 🌿 Welcome to the Ghibli Recipe Garden 🌿")
+    st.markdown("# 🌿 Welcome to Recipists 🌿")
     st.markdown("Your personal AI-powered culinary assistant.")
 
     st.markdown("---")
@@ -1106,29 +1195,28 @@ def login_page():
         st.markdown("### Login to Your Account")
         username = st.text_input("Enter your username:", key="login_username")
         password = st.text_input("Enter your password:", type="password", key="login_password")
-
         if st.button("Login", key="login_button", type="primary"):
-        if username and password:
-            # Hash the password
-            hashed_password = hashlib.sha256(password.encode()).hexdigest()
-            
-            # Check if user profile exists
-            profile_path = Path(DATA_DIR) / f"user_{username}.json"
-            if profile_path.exists():
-                # Existing user - verify password
-                existing_profile = load_user_profile(username)
-                if existing_profile.get('password_hash') == hashed_password:
-                    st.session_state.user_id = username
-                    st.session_state.user_profile = existing_profile
-                    st.session_state.current_page = "Home"
-                    st.success(f"Welcome back, {username}!")
-                    st.rerun()
+            if username and password:
+                # Hash the password
+                hashed_password = hashlib.sha256(password.encode()).hexdigest()
+                
+                # Check if user profile exists
+                profile_path = Path(DATA_DIR) / f"user_{username}.json"
+                if profile_path.exists():
+                    # Existing user - verify password
+                    existing_profile = load_user_profile(username)
+                    if existing_profile.get('password_hash') == hashed_password:
+                        st.session_state.user_id = username
+                        st.session_state.user_profile = existing_profile
+                        st.session_state.current_page = "Home"
+                        st.success(f"Welcome back, {username}!")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect password. Please try again.")
                 else:
-                    st.error("Incorrect password. Please try again.")
-            else:
                     st.error("User not found. Please create a new profile or check your username.")
-        else:
-            st.warning("Please enter both username and password.")
+            else:
+                st.warning("Please enter both username and password.")
     
     with tab2:
         st.markdown("### Create Your Profile")
@@ -1351,7 +1439,7 @@ def user_quiz_page():
 
 def profile_page():
     """User profile and achievements"""
-    st.markdown("## 👤 Your Recipe Garden Profile")
+    st.markdown("## 👤 Your Recipists Profile")
     
     profile = st.session_state.user_profile
     
@@ -1617,30 +1705,28 @@ def analytics_page():
     with col1:
         # Time distribution
         try:
-            time_bins = pd.cut(recipes_df['cook_time'], bins=[0, 30, 60, 120, 300], 
-                              labels=['Quick', 'Fast', 'Medium', 'Long'])
-            time_dist = pd.Series(time_bins).value_counts()
+            time_bins = pd.cut(recipes_df['minutes'], bins=[0, 30, 60, 120, float('inf')], 
+                              labels=['Quick', 'Medium', 'Long', 'Very Long'])
+            time_dist = time_bins.value_counts()
             
-            st.markdown("**Cook Time Distribution**")
-        for category, count in time_dist.items():
-            st.write(f"{category}: {count} ({count/len(recipes_df)*100:.1f}%)")
+            st.markdown("**Cooking Time Distribution**")
+            for category, count in time_dist.items():
+                st.write(f"{category}: {count} ({count/len(recipes_df)*100:.1f}%)")
         except Exception as e:
             st.write("Time distribution data not available")
     
     with col2:
         # Health score distribution
         try:
-        health_bins = pd.cut(recipes_df['health_score'], bins=[0, 50, 70, 85, 100], 
+            health_bins = pd.cut(recipes_df['health_score'], bins=[0, 50, 70, 85, 100], 
                                 labels=['Low', 'Medium', 'High', 'Very High'])
-            health_dist = pd.Series(health_bins).value_counts()
-        
-        st.markdown("**Health Score Distribution**")
+            health_dist = health_bins.value_counts()
+            
+            st.markdown("**Health Score Distribution**")
             for category, count in health_dist.items():
-            st.write(f"{category}: {count} ({count/len(recipes_df)*100:.1f}%)")
+                st.write(f"{category}: {count} ({count/len(recipes_df)*100:.1f}%)")
         except Exception as e:
             st.write("Health score distribution data not available")
-    
-    # Model performance (if available)
     if st.session_state.recommender:
         st.markdown("---")
         st.markdown("### 🤖 Model Performance")
@@ -1715,7 +1801,7 @@ def main():
         st.markdown("---")
         st.markdown("""
         <div style="text-align: center; color: #666; padding: 2rem;">
-            <p>🌿 Ghibli Recipe Garden - AI-Powered Recipe Recommendations 🌿</p>
+            <p>🌿 Recipists - AI-Powered Recipe Recommendations 🌿</p>
             <p style="font-size: 0.8rem;">Built with ❤️ using Streamlit and Machine Learning</p>
         </div>
         """, unsafe_allow_html=True)
