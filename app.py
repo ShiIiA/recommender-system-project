@@ -72,7 +72,7 @@ def load_model():
     """Load the trained hybrid recommendation model and id mappings"""
     try:
         # Load the hybrid model using the correct method
-        model = HybridRecommender.load_model("models")
+        model = HybridRecommender.load_model("models/hybrid_model.pkl")
         
         # Load ID mappings
         id_mappings = load_pickle(Path(ID_MAPPINGS_PATH))
