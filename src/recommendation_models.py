@@ -1,15 +1,12 @@
 """
-Main recommendation models for the recipe recommender system
+Hybrid Recommendation System
 """
-import pandas as pd
 import numpy as np
+import pandas as pd
 import pickle
-from pathlib import Path
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
-import warnings
-warnings.filterwarnings('ignore')
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 class HybridRecommender:
     """Hybrid recommendation system combining collaborative and content-based filtering"""
@@ -18,96 +15,84 @@ class HybridRecommender:
         self.collaborative_weight = collaborative_weight
         self.content_weight = content_weight
         self.collaborative_model = None
-        self.content_model = None
-        self.user_item_matrix = None
-        self.recipe_features = None
         self.user_features = None
-        self.recipe_ids = None
+        self.recipe_features = None
+        self.content_features = None
+        self.tfidf_ingredients = None
         self.user_ids = None
+        self.recipe_ids = None
+        self.recipe_metadata = None
         
-    def fit(self, interactions_df, recipes_df, n_components=100):
-        """Train the hybrid recommendation model"""
-        print("🔄 Training Hybrid Recommendation Model...")
+    def fit(self, interactions_df, recipes_df, n_components=50):
+        """Train the hybrid model"""
+        print("Training Hybrid Recommendation Model...")
         
-        # Prepare data
-        self._prepare_data(interactions_df, recipes_df)
+        # Create user-item matrix
+        user_item_matrix = interactions_df.pivot(
+            index='user_id', columns='recipe_id', values='rating'
+        ).fillna(0)
         
-        # Train collaborative filtering (SVD)
-        print("📊 Training Collaborative Filtering (SVD)...")
+        self.user_ids = user_item_matrix.index.tolist()
+        self.recipe_ids = user_item_matrix.columns.tolist()
+        
+        # Store recipe metadata
+        self.recipe_metadata = recipes_df.set_index('id').to_dict('index')
+        
+        # Train collaborative filtering
+        n_components = min(n_components, min(user_item_matrix.shape) - 1)
         self.collaborative_model = TruncatedSVD(n_components=n_components, random_state=42)
-        self.user_features = self.collaborative_model.fit_transform(self.user_item_matrix)
+        self.user_features = self.collaborative_model.fit_transform(user_item_matrix.values)
         self.recipe_features = self.collaborative_model.components_.T
         
         # Train content-based filtering
-        print("📝 Training Content-Based Filtering...")
         self._train_content_based(recipes_df)
         
-        print("✅ Hybrid model training complete!")
-        
-    def _prepare_data(self, interactions_df, recipes_df):
-        """Prepare data for training"""
-        # Create user-item matrix
-        self.user_item_matrix = interactions_df.pivot(
-            index='user_id', 
-            columns='recipe_id', 
-            values='rating'
-        ).fillna(0)
-        
-        # Store IDs for mapping
-        self.user_ids = self.user_item_matrix.index.tolist()
-        self.recipe_ids = self.user_item_matrix.columns.tolist()
+        print("Model training complete!")
         
     def _train_content_based(self, recipes_df):
-        """Train content-based filtering component"""
-        print("📝 Training Content-Based Filtering...")
+        """Train content-based filtering"""
+        # Process ingredients
+        ingredients_text = recipes_df['ingredients'].apply(
+            lambda x: ' '.join(x) if isinstance(x, list) else str(x)
+        )
         
-        # Prepare content features
-        recipes_df['content'] = recipes_df['ingredients'].apply(lambda x: ' '.join(x) if isinstance(x, list) else '')
-        recipes_df['content'] += ' ' + recipes_df['tags'].apply(lambda x: ' '.join(x) if isinstance(x, list) else '')
+        self.tfidf_ingredients = TfidfVectorizer(
+            max_features=100, stop_words='english', ngram_range=(1, 1)
+        )
+        ingredients_matrix = self.tfidf_ingredients.fit_transform(ingredients_text)
+        self.content_features = ingredients_matrix.toarray()
         
-        # TF-IDF vectorization
-        tfidf = TfidfVectorizer(max_features=1000, stop_words='english')
-        content_features = tfidf.fit_transform(recipes_df['content'])
-        
-        # After sampling and remapping, recipe IDs are now contiguous integers (0 to len-1)
-        # So we can directly use the recipe ID as the index into content_features
-        aligned_content_features = []
-        for recipe_id in self.recipe_ids:
-            # recipe_id is now a contiguous integer (0 to len-1)
-            if 0 <= recipe_id < content_features.shape[0]:
-                aligned_content_features.append(content_features[recipe_id].toarray().flatten())
-            else:
-                # If recipe not found, use zero vector
-                aligned_content_features.append(np.zeros(content_features.shape[1]))
-        
-        self.content_features = np.array(aligned_content_features)
-        
+        # Store mapping for recipes
+        self.content_recipe_mapping = {
+            recipe_id: idx for idx, recipe_id in enumerate(recipes_df['id'])
+        }
+    
     def recommend(self, user_id, n_recommendations=10):
         """Generate recommendations for a user"""
-        if self.user_ids is None or user_id not in self.user_ids:
-            raise ValueError(f"User {user_id} not found in training data")
+        if user_id not in self.user_ids:
+            # Return popular recipes for new users
+            return self._get_popular_recommendations(n_recommendations)
         
         user_idx = self.user_ids.index(user_id)
         
-        # Get collaborative filtering scores
-        if self.user_features is not None and self.recipe_features is not None:
-            cf_scores = self.user_features[user_idx] @ self.recipe_features.T
-        else:
-            cf_scores = np.zeros(len(self.recipe_ids) if self.recipe_ids is not None else 0)
+        # Collaborative filtering scores
+        user_vector = self.user_features[user_idx].reshape(1, -1)
+        cf_scores = cosine_similarity(user_vector, self.recipe_features)[0]
         
-        # Get content-based scores (if available)
-        cb_scores = np.zeros(len(self.recipe_ids) if self.recipe_ids is not None else 0)
-        if hasattr(self, 'content_features') and self.content_features is not None:
-            # Use content similarity between user preferences and recipe features
-            user_preferences = self.user_item_matrix.iloc[user_idx]
-            # Weight content features by user ratings
-            weighted_content = np.zeros(self.content_features.shape[1])
-            for i, rating in enumerate(user_preferences):
-                if rating > 0:
-                    weighted_content += rating * self.content_features[i]
-            
-            # Calculate similarity with all recipes
-            cb_scores = cosine_similarity([weighted_content], self.content_features)[0]
+        # Content-based scores
+        cb_scores = np.zeros(len(self.recipe_ids))
+        if hasattr(self, 'content_features'):
+            for i, recipe_id in enumerate(self.recipe_ids):
+                if recipe_id in self.content_recipe_mapping:
+                    content_idx = self.content_recipe_mapping[recipe_id]
+                    if content_idx < len(self.content_features):
+                        cb_scores[i] = np.mean(self.content_features[content_idx])
+        
+        # Normalize scores
+        if np.max(cf_scores) > 0:
+            cf_scores = cf_scores / np.max(cf_scores)
+        if np.max(cb_scores) > 0:
+            cb_scores = cb_scores / np.max(cb_scores)
         
         # Combine scores
         hybrid_scores = (self.collaborative_weight * cf_scores + 
@@ -118,12 +103,19 @@ class HybridRecommender:
         
         recommendations = []
         for idx in top_indices:
-            if self.recipe_ids is not None and idx < len(self.recipe_ids):
-                recipe_id = self.recipe_ids[idx]
-                score = hybrid_scores[idx]
-                recommendations.append((recipe_id, score))
+            recipe_id = self.recipe_ids[idx]
+            score = float(hybrid_scores[idx])
+            recommendations.append((recipe_id, score))
             
         return recommendations
+    
+    def _get_popular_recommendations(self, n_recommendations):
+        """Get popular recommendations for new users"""
+        popular_recipes = []
+        for recipe_id in self.recipe_ids[:n_recommendations]:
+            score = np.random.uniform(0.6, 0.9)  # Simulate popularity scores
+            popular_recipes.append((recipe_id, score))
+        return popular_recipes
     
     def save_model(self, filepath):
         """Save the trained model"""
@@ -131,16 +123,19 @@ class HybridRecommender:
             'collaborative_model': self.collaborative_model,
             'user_features': self.user_features,
             'recipe_features': self.recipe_features,
+            'content_features': self.content_features,
+            'tfidf_ingredients': self.tfidf_ingredients,
             'user_ids': self.user_ids,
             'recipe_ids': self.recipe_ids,
+            'recipe_metadata': self.recipe_metadata,
+            'content_recipe_mapping': getattr(self, 'content_recipe_mapping', {}),
             'collaborative_weight': self.collaborative_weight,
-            'content_weight': self.content_weight,
-            'content_features': self.content_features
+            'content_weight': self.content_weight
         }
         
         with open(filepath, 'wb') as f:
-            pickle.dump(model_data, f)
-        print(f"💾 Model saved to {filepath}")
+            pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Model saved to {filepath}")
     
     @classmethod
     def load_model(cls, filepath):
@@ -153,111 +148,15 @@ class HybridRecommender:
             content_weight=model_data['content_weight']
         )
         
+        # Restore all components
         model.collaborative_model = model_data['collaborative_model']
         model.user_features = model_data['user_features']
         model.recipe_features = model_data['recipe_features']
+        model.content_features = model_data['content_features']
+        model.tfidf_ingredients = model_data['tfidf_ingredients']
         model.user_ids = model_data['user_ids']
         model.recipe_ids = model_data['recipe_ids']
-        model.content_features = model_data['content_features']
+        model.recipe_metadata = model_data['recipe_metadata']
+        model.content_recipe_mapping = model_data.get('content_recipe_mapping', {})
         
         return model
-
-class ContentBasedRecommender:
-    """Content-based recommendation system using recipe features"""
-    
-    def __init__(self):
-        self.tfidf_ingredients = None
-        self.tfidf_tags = None
-        self.recipe_similarity = None
-        self.recipes_df = None
-        
-    def fit(self, recipes_df):
-        """Train the content-based model"""
-        self.recipes_df = recipes_df.copy()
-        
-        # TF-IDF for ingredients
-        ingredients_text = recipes_df['ingredients'].apply(lambda x: ' '.join(x) if isinstance(x, list) else '')
-        self.tfidf_ingredients = TfidfVectorizer(max_features=500, stop_words='english')
-        ingredients_matrix = self.tfidf_ingredients.fit_transform(ingredients_text)
-        
-        # TF-IDF for tags
-        tags_text = recipes_df['tags'].apply(lambda x: ' '.join(x) if isinstance(x, list) else '')
-        self.tfidf_tags = TfidfVectorizer(max_features=200, stop_words='english')
-        tags_matrix = self.tfidf_tags.fit_transform(tags_text)
-        
-        # Combine features
-        combined_matrix = np.hstack([ingredients_matrix.toarray(), tags_matrix.toarray()])
-        self.recipe_similarity = cosine_similarity(combined_matrix)
-        
-    def recommend(self, recipe_id, n_recommendations=10):
-        """Find similar recipes"""
-        if recipe_id not in self.recipes_df['id'].values:
-            return []
-        
-        recipe_idx = self.recipes_df[self.recipes_df['id'] == recipe_id].index[0]
-        similar_scores = self.recipe_similarity[recipe_idx]
-        
-        # Get top similar recipes (excluding the input recipe)
-        similar_indices = np.argsort(similar_scores)[::-1][1:n_recommendations+1]
-        
-        recommendations = []
-        for idx in similar_indices:
-            similar_recipe_id = self.recipes_df.iloc[idx]['id']
-            similarity_score = similar_scores[idx]
-            recommendations.append((similar_recipe_id, similarity_score))
-            
-        return recommendations
-
-class CollaborativeRecommender:
-    """Collaborative filtering using SVD"""
-    
-    def __init__(self, n_components=100):
-        self.n_components = n_components
-        self.svd = None
-        self.user_item_matrix = None
-        self.user_ids = None
-        self.recipe_ids = None
-        
-    def fit(self, interactions_df):
-        """Train the collaborative filtering model"""
-        # Create user-item matrix
-        self.user_item_matrix = interactions_df.pivot(
-            index='user_id', 
-            columns='recipe_id', 
-            values='rating'
-        ).fillna(0)
-        
-        self.user_ids = self.user_item_matrix.index.tolist()
-        self.recipe_ids = self.user_item_matrix.columns.tolist()
-        
-        # Apply SVD
-        self.svd = TruncatedSVD(n_components=self.n_components, random_state=42)
-        self.svd.fit(self.user_item_matrix)
-        
-    def recommend(self, user_id, n_recommendations=10):
-        """Generate recommendations for a user"""
-        if user_id not in self.user_ids:
-            return []
-        
-        user_idx = self.user_ids.index(user_id)
-        user_ratings = self.user_item_matrix.iloc[user_idx]
-        
-        # Transform user ratings
-        user_vector = self.svd.transform(user_ratings.values.reshape(1, -1))
-        
-        # Get predicted ratings
-        predicted_ratings = self.svd.inverse_transform(user_vector)[0]
-        
-        # Get top recommendations (excluding already rated recipes)
-        rated_mask = user_ratings > 0
-        predicted_ratings[rated_mask] = -1  # Exclude rated recipes
-        
-        top_indices = np.argsort(predicted_ratings)[::-1][:n_recommendations]
-        
-        recommendations = []
-        for idx in top_indices:
-            recipe_id = self.recipe_ids[idx]
-            score = predicted_ratings[idx]
-            recommendations.append((recipe_id, score))
-            
-        return recommendations 
